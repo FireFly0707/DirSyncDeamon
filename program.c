@@ -30,8 +30,77 @@ Uwagi: (a) Wszelkie operacje na plikach i tworzenie demona należy wykonywać
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <time.h>
+#include <syslog.h>
+#include <stdlib.h>
+#include <string.h>
 
 
+
+typedef struct FileList {
+    char** files;
+    int count;
+} FileList;
+
+FileList getRegularFiles(const char* path) {
+    FileList fileList;
+    fileList.files = NULL;
+    fileList.count = 0;
+
+    DIR* dir = opendir(path);
+    if (dir == NULL) {
+        printf("Błąd: Nie można otworzyć katalogu.\n");
+        return fileList;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_type == DT_REG) {
+            // Allocate memory for the new file name
+            char* fileName = malloc(strlen(entry->d_name) + 1);
+            strcpy(fileName, entry->d_name);
+
+            // Increase the count of files
+            fileList.count++;
+
+            // Reallocate memory for the files array
+            fileList.files = realloc(fileList.files, fileList.count * sizeof(char*));
+
+            // Add the new file name to the files array
+            fileList.files[fileList.count - 1] = fileName;
+        }
+    }
+
+    closedir(dir);
+
+    return fileList;
+}
+time_t getFileModificationDate(const char* filePath) {
+    struct stat fileStat;
+    if (stat(filePath, &fileStat) != 0) {
+        printf("Błąd: Nie można pobrać informacji o pliku.\n");
+        return -1;
+    }
+
+    return fileStat.st_mtime;
+}
+void writeToSystemLog(const char* message) {
+    time_t currentTime;
+    struct tm* timeInfo;
+    char timeString[20];
+
+    // Get current time
+    time(&currentTime);
+    timeInfo = localtime(&currentTime);
+
+    // Format time string
+    strftime(timeString, sizeof(timeString), "%Y-%m-%d %H:%M:%S", timeInfo);
+
+    // Write message to system log
+    openlog("DirSyncDaemon", LOG_PID, LOG_USER);
+    syslog(LOG_INFO, "[%s] %s", timeString, message);
+    closelog();
+}
 void copyFile(const char* srcPath, const char* destPath, size_t bufferSize) {
     int srcFile = open(srcPath, O_RDONLY);
     if (srcFile == -1) {
@@ -106,6 +175,16 @@ int main(int argc, char *argv[]) {
     // Jeżeli oba argumenty są katalogami, wypisz komunikat sukcesu
     printf("Oba argumenty są katalogami.\n");
 
-    showDirFiles(argv[1]);
+    struct FileList fileList = getRegularFiles(argv[1]);
+    
+    for (int i = 0; i < fileList.count; i++) {
+        
+        char buffer[strlen(argv[1])+ strlen(fileList.files[i]) + 2];
+        strcpy(buffer, argv[1]);
+        strcat(buffer, fileList.files[i]);
+        time_t fileModifcationTime = getFileModificationDate(buffer);
+        printf("Plik: %s CzasModyfikacji: %ld\n", buffer, fileModifcationTime);
+    }
+    
     return 0;
 }
