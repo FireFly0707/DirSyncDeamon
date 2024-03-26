@@ -25,64 +25,182 @@ Uwagi: (a) Wszelkie operacje na plikach i tworzenie demona należy wykonywać
   kopiowanie za każdym obudzeniem całego drzewa katalogów zostanie potraktowane jako poważny błąd
    (c) podobnie jak przerzucenie części zadań na shell systemowy (funkcja system).*/
 #include <stdio.h>
-#include <dirent.h>
+#include <stdlib.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <time.h>
+#include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <time.h>
-#include <syslog.h>
-#include <stdlib.h>
-#include <string.h>
+#include <utime.h>
+#include <stdbool.h>
+struct dirent **readNormalFiles(DIR *dir, int *num_entries) {
+    struct dirent **entries = NULL;
+    *num_entries = 0;
 
-
-
-typedef struct FileList {
-    char** files;
-    int count;
-} FileList;
-
-FileList getRegularFiles(const char* path) {
-    FileList fileList;
-    fileList.files = NULL;
-    fileList.count = 0;
-
-    DIR* dir = opendir(path);
-    if (dir == NULL) {
-        printf("Błąd: Nie można otworzyć katalogu.\n");
-        return fileList;
-    }
-
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_REG) {
-            // Allocate memory for the new file name
-            char* fileName = malloc(strlen(entry->d_name) + 1);
-            strcpy(fileName, entry->d_name);
-
-            // Increase the count of files
-            fileList.count++;
-
-            // Reallocate memory for the files array
-            fileList.files = realloc(fileList.files, fileList.count * sizeof(char*));
-
-            // Add the new file name to the files array
-            fileList.files[fileList.count - 1] = fileName;
+    struct dirent *entry;
+    while((entry = readdir(dir)) != NULL) {
+        if(entry->d_type == DT_REG) {
+            (*num_entries)++;
+            entries = realloc(entries, sizeof(struct dirent *) * (*num_entries));
+            if (entries == NULL) {
+                perror("Failed to allocate memory");
+                exit(EXIT_FAILURE);
+            }
+            entries[*num_entries - 1] = entry;
         }
     }
-
-    closedir(dir);
-
-    return fileList;
+    rewinddir(dir); // reset directory stream to the beginning
+    return entries;
 }
-time_t getFileModificationDate(const char* filePath) {
+time_t getLastModificationTime(char *path) {
     struct stat fileStat;
-    if (stat(filePath, &fileStat) != 0) {
-        printf("Błąd: Nie można pobrać informacji o pliku.\n");
+    if (stat(path, &fileStat) == -1) {
+        perror("stat");
         return -1;
     }
 
-    return fileStat.st_mtime;
+    // Uzyskujemy datę ostatniej modyfikacji pliku
+    time_t mod_time = fileStat.st_mtime;
+    return mod_time;
+
+}
+
+char *getFullPath(const char *dirPath, const char *fileName) {
+    // Uzyskujemy długość pełnej ścieżki
+    size_t len_dir = strlen(dirPath);
+    size_t len_file = strlen(fileName);
+    size_t len_total = len_dir + len_file + 2; // 1 na '/' i 1 na '\0'
+
+    // Alokujemy pamięć na pełną ścieżkę
+    char *fullPath = (char *)malloc(len_total);
+    if (fullPath == NULL) {
+        perror("Memory allocation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Kopiujemy ścieżkę katalogu i nazwę pliku do pełnej ścieżki
+    strcpy(fullPath, dirPath);
+    fullPath[len_dir] = '/';
+    strcpy(fullPath + len_dir + 1, fileName);
+    
+    return fullPath;
+}
+#define BUFFER_SIZE 4096 // Domyślny rozmiar bufora
+
+void copyFile(const char *sourcePath, const char *destinationPath, size_t bufferSize) {
+    // Otwieranie pliku źródłowego do odczytu
+    int sourceFile = open(sourcePath, O_RDONLY);
+    if (sourceFile == -1) {
+        perror("Failed to open source file");
+        exit(EXIT_FAILURE);
+    }
+
+    // Otwieranie pliku docelowego do zapisu
+    int destinationFile = open(destinationPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (destinationFile == -1) {
+        perror("Failed to open destination file");
+        exit(EXIT_FAILURE);
+    }
+
+    // Bufor do odczytu i zapisu
+    char buffer[bufferSize];
+
+    ssize_t bytesRead, bytesWritten;
+    while ((bytesRead = read(sourceFile, buffer, bufferSize)) > 0) {
+        bytesWritten = write(destinationFile, buffer, bytesRead);
+        if (bytesWritten != bytesRead) {
+            perror("Error while writing to destination file");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Sprawdzanie błędów przy odczycie
+    if (bytesRead == -1) {
+        perror("Error while reading from source file");
+        exit(EXIT_FAILURE);
+    }
+
+    // Zamykanie plików
+    if (close(sourceFile) == -1) {
+        perror("Error while closing source file");
+        exit(EXIT_FAILURE);
+    }
+
+    if (close(destinationFile) == -1) {
+        perror("Error while closing destination file");
+        exit(EXIT_FAILURE);
+    }
+}
+int setFileModificationTime(const char *filePath, time_t modificationTime) {
+    struct utimbuf new_times;
+
+    // Ustawienie nowych czasów modyfikacji
+    new_times.actime = time(NULL); // Zostaw aktualny czas dostępu bez zmian
+    new_times.modtime = modificationTime;
+
+    // Ustawienie czasów modyfikacji pliku
+    if (utime(filePath, &new_times) == -1) {
+        perror("Failed to set file modification time");
+        return 0; // Zwraca 0 w przypadku błędu
+    }
+
+    return 1; // Zwraca 1 w przypadku powodzenia
+}
+void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, size_t bufferSize)
+{
+    DIR *sourceDir = opendir(sourceDirPath);
+    if(sourceDir == NULL) {
+        return 1;
+    }
+    DIR *destinationDir = opendir(destinationDirPath);
+    if(destinationDir == NULL) {
+        return 1;
+        closedir(sourceDir);
+    }
+    int num_source_entries;
+    int num_destination_entries;
+
+    struct dirent **sourceEntries = readNormalFiles(sourceDir, &num_source_entries);
+    struct dirent **destinationEntries = readNormalFiles(destinationDir, &num_destination_entries);
+    for(int i = 0; i< num_source_entries;i++)
+    {
+        bool found = false;
+        for(int j = 0;j<num_destination_entries;j++)
+        {
+            if(strcmp(sourceEntries[i]->d_name,destinationEntries[j]->d_name) == 0)
+            {
+                found = true;
+                char* sourceFullPath = getFullPath(sourceDirPath, sourceEntries[i]->d_name);
+                char* destinationFullPath = getFullPath(destinationDirPath, destinationEntries[j]->d_name);
+                time_t sourceModTime = getLastModificationTime(sourceFullPath);
+                time_t destinationModTime = getLastModificationTime(destinationFullPath);
+                if(sourceModTime != destinationModTime)
+                {
+                    copyFile(sourceFullPath,destinationFullPath,bufferSize);
+                    setFileModificationTime(destinationFullPath,sourceModTime);
+                    printf("Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
+                }
+                free(sourceFullPath);
+                free(destinationFullPath);
+                break;
+            }
+        }
+        if(found==false)
+        {
+            char* sourceFullPath = getFullPath(sourceDirPath, sourceEntries[i]->d_name);
+            char* destinationFullPath = getFullPath(destinationDirPath, sourceEntries[i]->d_name);
+            copyFile(sourceFullPath,destinationFullPath,bufferSize);
+            time_t sourceModTime = getLastModificationTime(sourceFullPath);
+            setFileModificationTime(destinationFullPath,sourceModTime);
+            printf("Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
+            free(sourceFullPath);
+            free(destinationFullPath);
+        
+        }
+    }
+    return;
+    
 }
 void writeToSystemLog(const char* message) {
     time_t currentTime;
@@ -101,90 +219,26 @@ void writeToSystemLog(const char* message) {
     syslog(LOG_INFO, "[%s] %s", timeString, message);
     closelog();
 }
-void copyFile(const char* srcPath, const char* destPath, size_t bufferSize) {
-    int srcFile = open(srcPath, O_RDONLY);
-    if (srcFile == -1) {
-        printf("Błąd: Nie można otworzyć pliku źródłowego.\n");
-        return;
-    }
-
-    int destFile = open(destPath, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-    if (destFile == -1) {
-        printf("Błąd: Nie można otworzyć pliku docelowego.\n");
-        close(srcFile);
-        return;
-    }
-
-    char buffer[bufferSize];
-    ssize_t bytesRead;
-    while ((bytesRead = read(srcFile, buffer, sizeof(buffer))) > 0) {
-        ssize_t bytesWritten = write(destFile, buffer, bytesRead);
-        if (bytesWritten == -1) {
-            printf("Błąd: Nie można zapisać danych do pliku docelowego.\n");
-            close(srcFile);
-            close(destFile);
-            return;
-        }
-    }
-
-    if (bytesRead == -1) {
-        printf("Błąd: Nie można odczytać danych z pliku źródłowego.\n");
-    }
-
-    close(srcFile);
-    close(destFile);
-}
-void showDirFiles(const char* path) {
-    DIR* dir = opendir(path);
-    if (dir == NULL) {
-        printf("Błąd: Nie można otworzyć katalogu.\n");
-        return;
-    }
-
-    struct dirent* entry;
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_type == DT_REG) {
-            printf("Plik: %s\n", entry->d_name);
-        }
-    }
-
-    closedir(dir);
-}
-
 int main(int argc, char *argv[]) {
     // Sprawdź, czy podano dwa argumenty
-    if (argc != 3) {
-        printf("Błąd: Należy podać dokładnie dwa argumenty - ścieżki do katalogów.\n");
+    if (argc < 3 ) {
+        printf("deamon sourceDir destinationDir <options>\n");
         return 1;
     }
 
-    // Sprawdź, czy pierwszy argument jest katalogiem
-    struct stat dir1_stat;
-    if (stat(argv[1], &dir1_stat) != 0 || !S_ISDIR(dir1_stat.st_mode)) {
-        printf("Błąd: Pierwszy argument nie jest katalogiem.\n");
+    DIR *sourceDir = opendir(argv[1]);
+    if(sourceDir == NULL) {
+        printf("Błąd: Podana ścieżka źródłowa nie jest katalogiem.\n");
         return 1;
     }
-
-    // Sprawdź, czy drugi argument jest katalogiem
-    struct stat dir2_stat;
-    if (stat(argv[2], &dir2_stat) != 0 || !S_ISDIR(dir2_stat.st_mode)) {
-        printf("Błąd: Drugi argument nie jest katalogiem.\n");
-        return 1;
+    closedir(sourceDir);
+    DIR *destinationDir = opendir(argv[2]);
+    if(destinationDir == NULL) {
+        printf("Błąd: Podana ścieżka docelowa nie jest katalogiem.\n");
+        return 1;     
     }
-
-    // Jeżeli oba argumenty są katalogami, wypisz komunikat sukcesu
-    printf("Oba argumenty są katalogami.\n");
-
-    struct FileList fileList = getRegularFiles(argv[1]);
-    
-    for (int i = 0; i < fileList.count; i++) {
-        
-        char buffer[strlen(argv[1])+ strlen(fileList.files[i]) + 2];
-        strcpy(buffer, argv[1]);
-        strcat(buffer, fileList.files[i]);
-        time_t fileModifcationTime = getFileModificationDate(buffer);
-        printf("Plik: %s CzasModyfikacji: %ld\n", buffer, fileModifcationTime);
-    }
-    
+    closedir(destinationDir);
+    if()
+    SyncDirNormalFiles(argv[1],argv[2],1024);
     return 0;
 }
