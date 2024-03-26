@@ -34,6 +34,16 @@ Uwagi: (a) Wszelkie operacje na plikach i tworzenie demona należy wykonywać
 #include <unistd.h>
 #include <utime.h>
 #include <stdbool.h>
+#include <syslog.h>
+int deleteFile(const char *filePath) {
+    // Usuwanie pliku
+    if (unlink(filePath) == -1) {
+        perror("Failed to delete file");
+        return 0; // Zwraca 0 w przypadku błędu
+    }
+
+    return 1; // Zwraca 1 w przypadku powodzenia
+}
 struct dirent **readNormalFiles(DIR *dir, int *num_entries) {
     struct dirent **entries = NULL;
     *num_entries = 0;
@@ -151,12 +161,12 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, size_t buf
 {
     DIR *sourceDir = opendir(sourceDirPath);
     if(sourceDir == NULL) {
-        return 1;
+        return;
     }
     DIR *destinationDir = opendir(destinationDirPath);
     if(destinationDir == NULL) {
-        return 1;
         closedir(sourceDir);
+        return;
     }
     int num_source_entries;
     int num_destination_entries;
@@ -199,6 +209,31 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, size_t buf
         
         }
     }
+    for(int i = 0; i<num_destination_entries;i++)
+    {
+        bool found = false;
+        for(int j = 0;j<num_source_entries;j++)
+        {
+            if(strcmp(destinationEntries[i]->d_name,sourceEntries[j]->d_name) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+        if(found == false)
+        {
+            char* destinationFullPath = getFullPath(destinationDirPath, destinationEntries[i]->d_name);
+            deleteFile(destinationFullPath);
+            printf("Usuwanie pliku %s z %s\n",destinationEntries[i]->d_name,destinationDirPath);
+            free(destinationFullPath);
+        }
+    }
+
+    free(sourceEntries);
+    free(destinationEntries);
+
+    closedir(sourceDir);
+    closedir(destinationDir);
     return;
     
 }
@@ -238,7 +273,7 @@ int main(int argc, char *argv[]) {
         return 1;     
     }
     closedir(destinationDir);
-    if()
+    
     SyncDirNormalFiles(argv[1],argv[2],1024);
     return 0;
 }
