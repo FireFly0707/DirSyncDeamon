@@ -15,7 +15,8 @@
      wykonanie kopii lub usunięcie pliku jest przesłana do logu systemowego. Informacja ta powinna zawierać aktualną datę.
 
 a) [10p.]  Dodatkowa opcja -R pozwalająca na rekurencyjną synchronizację katalogów (teraz pozycje będące katalogami nie są ignorowane).
- W szczególności jeżeli demon  stwierdzi w katalogu docelowym  podkatalog którego brak w katalogu źródłowym powinien usunąć go wraz z zawartością.
+ W szczególności jeżeli demon  stwierdzi w katalogu docelowym  podkatalog którego brak w katalogu źródłowym powinien usunąć go wraz 
+ z zawartością.
 b) [12p.] W zależności  od rozmiaru plików dla małych plików wykonywane jest kopiowanie przy pomocy read/write
  a w przypadku dużych przy pomocy mmap/write (plik źródłowy) zostaje zamapowany w całości w pamięci. 
  Próg dzielący pliki małe od dużych  może być przekazywany jako opcjonalny argument.
@@ -35,6 +36,10 @@ Uwagi: (a) Wszelkie operacje na plikach i tworzenie demona należy wykonywać
 #include <utime.h>
 #include <stdbool.h>
 #include <syslog.h>
+#include <sys/mman.h>
+#define BUFFER_SIZE 4096 // Domyślny rozmiar bufora
+void copyFileUsingRead(const char *sourcePath, const char *destinationPath);
+void copyFileUsingMmap(const char *sourcePath, const char *destinationPath);
 int deleteFile(const char *filePath) {
     // Usuwanie pliku
     if (unlink(filePath) == -1) {
@@ -51,6 +56,25 @@ struct dirent **readNormalFiles(DIR *dir, int *num_entries) {
     struct dirent *entry;
     while((entry = readdir(dir)) != NULL) {
         if(entry->d_type == DT_REG) {
+            (*num_entries)++;
+            entries = realloc(entries, sizeof(struct dirent *) * (*num_entries));
+            if (entries == NULL) {
+                perror("Failed to allocate memory");
+                exit(EXIT_FAILURE);
+            }
+            entries[*num_entries - 1] = entry;
+        }
+    }
+    rewinddir(dir); // reset directory stream to the beginning
+    return entries;
+}
+struct dirent **readDirs(DIR *dir, int *num_entries) {
+    struct dirent **entries = NULL;
+    *num_entries = 0;
+
+    struct dirent *entry;
+    while((entry = readdir(dir)) != NULL) {
+        if(entry->d_type == DT_DIR && strcmp(entry->d_name,".") != 0 && strcmp(entry->d_name,"..") != 0) {
             (*num_entries)++;
             entries = realloc(entries, sizeof(struct dirent *) * (*num_entries));
             if (entries == NULL) {
@@ -96,51 +120,166 @@ char *getFullPath(const char *dirPath, const char *fileName) {
     
     return fullPath;
 }
-#define BUFFER_SIZE 4096 // Domyślny rozmiar bufora
+void deleteDirectoryRecursively(const char *dirPath) {
+    DIR *dir;
+    struct dirent *entry;
+    
 
-void copyFile(const char *sourcePath, const char *destinationPath, size_t bufferSize) {
+    // Otwieramy katalog
+    dir = opendir(dirPath);
+    if (dir == NULL) {
+        perror("Unable to open directory");
+        return;
+    }
+
+    // Iterujemy przez zawartość katalogu
+    while ((entry = readdir(dir)) != NULL) {
+        // Pomijamy "." i ".."
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        char *fullPath;
+        // Tworzymy pełną ścieżkę do aktualnego elementu w katalogu
+        if (entry->d_type == DT_DIR) {
+            fullPath = getFullPath(dirPath, entry->d_name);
+        }
+        else
+        {
+            fullPath = getFullPath(dirPath, entry->d_name);
+        }
+        
+        // Jeśli aktualny element jest katalogiem, wywołujemy funkcję rekurencyjnie
+        if (entry->d_type == DT_DIR) {
+            deleteDirectoryRecursively(fullPath);
+        } else { // W przeciwnym razie usuwamy plik
+            if (unlink(fullPath) == -1) {
+                perror("Unable to delete file");
+                free(fullPath);
+                closedir(dir);
+                return;
+            }
+        }
+
+        // Zwolnienie pamięci zaalokowanej dla pełnej ścieżki
+        free(fullPath);
+    }
+
+    // Zamykamy katalog
+    closedir(dir);
+
+    // Usuwamy sam katalog
+    if (rmdir(dirPath) == -1) {
+        perror("Unable to delete directory");
+    }
+}
+void copyFile(const char *sourcePath, const char *destinationPath,int copySize)
+{
+    struct stat sourceStat;
+    if (stat(sourcePath, &sourceStat) == -1) {
+        perror("Failed to get source file stats");
+        return;
+    }
+    off_t fileSize = sourceStat.st_size;
+    if(fileSize <= copySize)
+    {
+        copyFileUsingRead(sourcePath,destinationPath);
+    }else
+    {
+        copyFileUsingMmap(sourcePath,destinationPath);
+    }
+
+}
+
+void copyFileUsingRead(const char *sourcePath, const char *destinationPath) {
     // Otwieranie pliku źródłowego do odczytu
     int sourceFile = open(sourcePath, O_RDONLY);
     if (sourceFile == -1) {
         perror("Failed to open source file");
-        exit(EXIT_FAILURE);
+        return;
     }
 
     // Otwieranie pliku docelowego do zapisu
     int destinationFile = open(destinationPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (destinationFile == -1) {
         perror("Failed to open destination file");
-        exit(EXIT_FAILURE);
+        return;
     }
 
     // Bufor do odczytu i zapisu
-    char buffer[bufferSize];
+    char buffer[BUFFER_SIZE];
 
     ssize_t bytesRead, bytesWritten;
-    while ((bytesRead = read(sourceFile, buffer, bufferSize)) > 0) {
+    while ((bytesRead = read(sourceFile, buffer, BUFFER_SIZE)) > 0) {
         bytesWritten = write(destinationFile, buffer, bytesRead);
         if (bytesWritten != bytesRead) {
             perror("Error while writing to destination file");
-            exit(EXIT_FAILURE);
+            return;
         }
     }
 
     // Sprawdzanie błędów przy odczycie
     if (bytesRead == -1) {
         perror("Error while reading from source file");
-        exit(EXIT_FAILURE);
+        return;
     }
 
     // Zamykanie plików
     if (close(sourceFile) == -1) {
         perror("Error while closing source file");
-        exit(EXIT_FAILURE);
+        return;
     }
 
     if (close(destinationFile) == -1) {
         perror("Error while closing destination file");
-        exit(EXIT_FAILURE);
+        return;
     }
+}void copyFileUsingMmap(const char *sourcePath, const char *destinationPath) {
+    // Otwarcie pliku źródłowego do odczytu
+    int sourceFile = open(sourcePath, O_RDONLY);
+    if (sourceFile == -1) {
+        perror("Failed to open source file");
+        return;
+    }
+
+    // Uzyskanie rozmiaru pliku źródłowego
+    struct stat sourceStat;
+    if (fstat(sourceFile, &sourceStat) == -1) {
+        perror("Failed to get source file stats");
+        close(sourceFile);
+        return;
+    }
+    off_t fileSize = sourceStat.st_size;
+
+    // Otwarcie pliku docelowego do zapisu
+    int destinationFile = open(destinationPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (destinationFile == -1) {
+        perror("Failed to open destination file");
+        close(sourceFile);
+        return;
+    }
+
+    // Zmapowanie pliku źródłowego do pamięci
+    void *sourcePtr = mmap(NULL, fileSize, PROT_READ, MAP_PRIVATE, sourceFile, 0);
+    if (sourcePtr == MAP_FAILED) {
+        perror("Failed to map source file to memory");
+        close(sourceFile);
+        close(destinationFile);
+        return;
+    }
+
+    // Zapisanie zmapowanego pliku źródłowego do pliku docelowego
+    if (write(destinationFile, sourcePtr, fileSize) == -1) {
+        perror("Failed to write to destination file");
+    }
+
+    // Odmapowanie pliku źródłowego z pamięci
+    if (munmap(sourcePtr, fileSize) == -1) {
+        perror("Failed to unmap source file from memory");
+    }
+
+    // Zamknięcie plików
+    close(sourceFile);
+    close(destinationFile);
 }
 int setFileModificationTime(const char *filePath, time_t modificationTime) {
     struct utimbuf new_times;
@@ -157,7 +296,7 @@ int setFileModificationTime(const char *filePath, time_t modificationTime) {
 
     return 1; // Zwraca 1 w przypadku powodzenia
 }
-void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, size_t bufferSize)
+void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, int copySize)
 {
     DIR *sourceDir = opendir(sourceDirPath);
     if(sourceDir == NULL) {
@@ -187,7 +326,7 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, size_t buf
                 time_t destinationModTime = getLastModificationTime(destinationFullPath);
                 if(sourceModTime != destinationModTime)
                 {
-                    copyFile(sourceFullPath,destinationFullPath,bufferSize);
+                    copyFile(sourceFullPath,destinationFullPath,copySize);
                     setFileModificationTime(destinationFullPath,sourceModTime);
                     printf("Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
                 }
@@ -200,7 +339,7 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, size_t buf
         {
             char* sourceFullPath = getFullPath(sourceDirPath, sourceEntries[i]->d_name);
             char* destinationFullPath = getFullPath(destinationDirPath, sourceEntries[i]->d_name);
-            copyFile(sourceFullPath,destinationFullPath,bufferSize);
+            copyFile(sourceFullPath,destinationFullPath,copySize);
             time_t sourceModTime = getLastModificationTime(sourceFullPath);
             setFileModificationTime(destinationFullPath,sourceModTime);
             printf("Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
@@ -237,6 +376,90 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, size_t buf
     return;
     
 }
+void SyncDirRecoursively(char *sourceDirPath,char *destinationDirPath, int copySize)
+{
+    DIR *sourceDir = opendir(sourceDirPath);
+    if(sourceDir == NULL) {
+        return;
+    }
+    DIR *destinationDir = opendir(destinationDirPath);
+    if(destinationDir == NULL) {
+        closedir(sourceDir);
+        return;
+    }
+    int num_source_entries_dirs;
+    int num_destination_entries_dirs;
+
+    struct dirent **sourceEntriesDirs = readDirs(sourceDir, &num_source_entries_dirs);
+    struct dirent **destinationEntriesDirs = readDirs(destinationDir, &num_destination_entries_dirs);
+
+    /*int num_source_entries_files;
+    int num_destination_entries_files;
+
+    struct dirent **sourceEntriesFiles = readDirs(sourceDir, &num_source_entries_files);
+    struct dirent **destinationEntriesFiles = readDirs(destinationDir, &num_destination_entries_files);*/
+    for(int i = 0; i< num_source_entries_dirs;i++)
+    {
+        bool found = false;
+        for(int j = 0;j<num_destination_entries_dirs;j++)
+        {
+            if(strcmp(sourceEntriesDirs[i]->d_name,destinationEntriesDirs[j]->d_name) == 0)
+            {
+                found = true;
+                char* sourceFullPath = getFullPath(sourceDirPath, sourceEntriesDirs[i]->d_name);
+                char* destinationFullPath = getFullPath(destinationDirPath, destinationEntriesDirs[j]->d_name);
+                
+                SyncDirRecoursively(sourceFullPath,destinationFullPath,copySize);   
+                    
+                printf("Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
+                
+                free(sourceFullPath);
+                free(destinationFullPath);
+                break;
+            }
+        }
+        if(found==false)
+        {
+            char* sourceFullPath = getFullPath(sourceDirPath, sourceEntriesDirs[i]->d_name);
+            char* destinationFullPath = getFullPath(destinationDirPath, sourceEntriesDirs[i]->d_name);
+            mkdir(destinationFullPath, 0755);
+            SyncDirRecoursively(sourceFullPath,destinationFullPath,copySize);
+            printf("Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
+            free(sourceFullPath);
+            free(destinationFullPath);
+        
+        }
+    }
+    for(int i = 0; i<num_destination_entries_dirs;i++)
+    {
+        bool found = false;
+        for(int j = 0;j<num_source_entries_dirs;j++)
+        {
+            if(strcmp(destinationEntriesDirs[i]->d_name,sourceEntriesDirs[j]->d_name) == 0)
+            {
+                found = true;
+                break;
+            }
+        }
+        if(found == false)
+        {
+            char* destinationFullPath = getFullPath(destinationDirPath, destinationEntriesDirs[i]->d_name);
+            printf("Usuwanie katalogu %s z %s\n",destinationEntriesDirs[i]->d_name,destinationDirPath);
+            deleteDirectoryRecursively(destinationFullPath);
+            
+            free(destinationFullPath);
+        }
+    }
+
+    free(sourceEntriesDirs);
+    free(destinationEntriesDirs);
+
+    closedir(sourceDir);
+    closedir(destinationDir);
+    SyncDirNormalFiles(sourceDirPath,destinationDirPath,copySize);
+    return;
+    
+}
 void writeToSystemLog(const char* message) {
     time_t currentTime;
     struct tm* timeInfo;
@@ -254,8 +477,31 @@ void writeToSystemLog(const char* message) {
     syslog(LOG_INFO, "[%s] %s", timeString, message);
     closelog();
 }
+int stringToInt(const char *str) {
+    // Sprawdź, czy łańcuch znaków jest pusty
+    if (str == NULL || *str == '\0') {
+        return -1;
+    }
+
+    // Użyj funkcji strtol do konwersji łańcucha znaków na liczbę całkowitą
+    char *endptr;
+    long int value = strtol(str, &endptr, 10);
+
+    // Sprawdź, czy nie nastąpił błąd podczas konwersji
+    if (endptr == str || *endptr != '\0') {
+        return -1;
+    }
+    
+    // Zwróć wynik konwersji
+    return (int)value;
+}
 int main(int argc, char *argv[]) {
     // Sprawdź, czy podano dwa argumenty
+    bool recursive = false;
+    bool sleep = false;
+    int sleepTime = 300;
+    bool size = false;
+    int copySize = 1024;
     if (argc < 3 ) {
         printf("deamon sourceDir destinationDir <options>\n");
         return 1;
@@ -273,7 +519,57 @@ int main(int argc, char *argv[]) {
         return 1;     
     }
     closedir(destinationDir);
+    for(int i =3;i<argc;i++)
+    {
+        if(strcmp(argv[i],"-R") == 0)
+        {
+            recursive = true;
+            
+        }else if(strcmp(argv[i],"-sleep") == 0)
+        {
+            sleep = true;
+            i++;
+            sleepTime = stringToInt(argv[i]);
+            if(sleepTime == -1)
+            {
+                printf("Błąd: Podany czas spania nie jest liczbą całkowitą.\n");
+                return 1;
+            }
+
+        }else if(strcmp(argv[i],"-size") == 0)
+        {
+            size = true;
+            i++;
+            copySize = stringToInt(argv[i]);
+            if(size == -1)
+            {
+                printf("Błąd: Podany rozmiar pliku nie jest liczbą całkowitą.\n");
+                return 1;
+            }
+        }
+        else 
+        {
+            printf("Błąd: Nieznana opcja %s\n",argv[i]);
+            return 1;
+        }
+    }
+    if(recursive == true)
+    {
+        printf("Synchronizacja rekurencyjna\n");
+        SyncDirRecoursively(argv[1],argv[2],-1);
+    }
+    if(sleep == true)
+    {
+        printf("Czas spania: %d\n",sleepTime);
+    }
+    if(size == true)
+    {
+        printf("Rozmiar pliku: %d\n",copySize);
+    }
+    else
+    {
+        SyncDirNormalFiles(argv[1],argv[2],-1);
+    }
     
-    SyncDirNormalFiles(argv[1],argv[2],1024);
     return 0;
 }
