@@ -489,12 +489,12 @@ void SyncDirRecoursively(char *sourceDirPath,char *destinationDirPath, int copyS
                 char* sourceFullPath = getFullPath(sourceDirPath, sourceEntriesDirs[i]->d_name);
                 char* destinationFullPath = getFullPath(destinationDirPath, destinationEntriesDirs[j]->d_name);
                 
-                SyncDirRecoursively(sourceFullPath,destinationFullPath,copySize);   
+                  
                 char buffer[1024];
                 sprintf(buffer,"Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
                 writeToSystemLog(buffer);
                 //printf("Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
-                
+                SyncDirRecoursively(sourceFullPath,destinationFullPath,copySize);
                 free(sourceFullPath);
                 free(destinationFullPath);
                 break;
