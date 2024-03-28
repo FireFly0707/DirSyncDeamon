@@ -37,13 +37,75 @@ Uwagi: (a) Wszelkie operacje na plikach i tworzenie demona należy wykonywać
 #include <stdbool.h>
 #include <syslog.h>
 #include <sys/mman.h>
+#include <signal.h>
+#include <sys/types.h>
 #define BUFFER_SIZE 4096 // Domyślny rozmiar bufora
 void copyFileUsingRead(const char *sourcePath, const char *destinationPath);
 void copyFileUsingMmap(const char *sourcePath, const char *destinationPath);
+void writeToSystemLog(const char* message);
+char* concatenateStrings(const char* str1, const char* str2) {
+    // Alokacja pamięci dla nowego stringa (suma długości obu stringów + 1 dla null terminatora)
+    char* result = malloc(strlen(str1) + strlen(str2) + 1);
+
+    // Sprawdzenie, czy alokacja pamięci powiodła się
+    if(result == NULL) {
+        return NULL;
+    }
+
+    // Kopiowanie str1 do result
+    strcpy(result, str1);
+
+    // Dodawanie str2 do result
+    strcat(result, str2);
+
+    return result;
+}
+volatile sig_atomic_t flag = 0;
+
+void handle_sigusr1(int sig) {
+    flag = 1;
+}
+
+void handle_sigterm(int sig) {
+    syslog(LOG_INFO, "Demon zakończony");
+    closelog();
+    exit(0);
+}
+void demonize()
+{
+    pid_t pid;
+    int i;
+    pid = fork();
+    if(pid==-1) {
+        exit(-1);
+    }else if(pid!=0) {
+        exit(EXIT_SUCCESS);
+    }
+    
+    if(setsid() == -1) {
+        exit(-1);
+    }
+    if(chdir("/") == -1) {
+        exit(-1);
+    }
+    // Zamknij standardowe strumienie wejścia/wyjścia
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+    open("/dev/null", O_RDWR);
+    dup(0);
+    dup(0);
+
+    signal(SIGUSR1, handle_sigusr1);
+    signal(SIGTERM, handle_sigterm);
+}
 int deleteFile(const char *filePath) {
     // Usuwanie pliku
     if (unlink(filePath) == -1) {
-        perror("Failed to delete file");
+        char *message = concatenateStrings("Nie udało się usunąć pliku ",filePath);
+        writeToSystemLog(message);
+        free(message);
         return 0; // Zwraca 0 w przypadku błędu
     }
 
@@ -59,7 +121,7 @@ struct dirent **readNormalFiles(DIR *dir, int *num_entries) {
             (*num_entries)++;
             entries = realloc(entries, sizeof(struct dirent *) * (*num_entries));
             if (entries == NULL) {
-                perror("Failed to allocate memory");
+                writeToSystemLog("Nie udało się zaalokować pamięci wyłączanie Demona");
                 exit(EXIT_FAILURE);
             }
             entries[*num_entries - 1] = entry;
@@ -78,7 +140,7 @@ struct dirent **readDirs(DIR *dir, int *num_entries) {
             (*num_entries)++;
             entries = realloc(entries, sizeof(struct dirent *) * (*num_entries));
             if (entries == NULL) {
-                perror("Failed to allocate memory");
+                writeToSystemLog("Nie udało się zaalokować pamięci wyłączanie Demona");
                 exit(EXIT_FAILURE);
             }
             entries[*num_entries - 1] = entry;
@@ -90,7 +152,9 @@ struct dirent **readDirs(DIR *dir, int *num_entries) {
 time_t getLastModificationTime(char *path) {
     struct stat fileStat;
     if (stat(path, &fileStat) == -1) {
-        perror("stat");
+        char *message = concatenateStrings("Nie udało się uzyskać informacji o czasie ostatniej modyfikacji pliku ",path);
+        writeToSystemLog(message);
+        free(message);
         return -1;
     }
 
@@ -109,7 +173,7 @@ char *getFullPath(const char *dirPath, const char *fileName) {
     // Alokujemy pamięć na pełną ścieżkę
     char *fullPath = (char *)malloc(len_total);
     if (fullPath == NULL) {
-        perror("Memory allocation failed");
+        writeToSystemLog("Nie udało się zaalokować pamięci wyłączanie Demona");
         exit(EXIT_FAILURE);
     }
 
@@ -128,7 +192,9 @@ void deleteDirectoryRecursively(const char *dirPath) {
     // Otwieramy katalog
     dir = opendir(dirPath);
     if (dir == NULL) {
-        perror("Unable to open directory");
+        char *message = concatenateStrings("Nie udało się otworzyć katalogu ",dirPath);
+        writeToSystemLog(message);
+        free(message);
         return;
     }
 
@@ -153,7 +219,9 @@ void deleteDirectoryRecursively(const char *dirPath) {
             deleteDirectoryRecursively(fullPath);
         } else { // W przeciwnym razie usuwamy plik
             if (unlink(fullPath) == -1) {
-                perror("Unable to delete file");
+                char *message = concatenateStrings("Nie udało się usunąć pliku ",fullPath);
+                writeToSystemLog(message);
+                free(message);
                 free(fullPath);
                 closedir(dir);
                 return;
@@ -169,14 +237,19 @@ void deleteDirectoryRecursively(const char *dirPath) {
 
     // Usuwamy sam katalog
     if (rmdir(dirPath) == -1) {
-        perror("Unable to delete directory");
+        char *message = concatenateStrings("Nie udało się usunąć katalogu ",dirPath);
+        writeToSystemLog(message);
+        free(message);
+        return;
     }
 }
 void copyFile(const char *sourcePath, const char *destinationPath,int copySize)
 {
     struct stat sourceStat;
     if (stat(sourcePath, &sourceStat) == -1) {
-        perror("Failed to get source file stats");
+        char *message = concatenateStrings("Nie udało się uzyskać informacji o pliku ",sourcePath);
+        writeToSystemLog(message);
+        free(message);
         return;
     }
     off_t fileSize = sourceStat.st_size;
@@ -194,14 +267,18 @@ void copyFileUsingRead(const char *sourcePath, const char *destinationPath) {
     // Otwieranie pliku źródłowego do odczytu
     int sourceFile = open(sourcePath, O_RDONLY);
     if (sourceFile == -1) {
-        perror("Failed to open source file");
+        char *message = concatenateStrings("Nie udało się otworzyć pliku ",sourcePath);
+        writeToSystemLog(message);
+        free(message);
         return;
     }
 
     // Otwieranie pliku docelowego do zapisu
     int destinationFile = open(destinationPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (destinationFile == -1) {
-        perror("Failed to open destination file");
+        char *message = concatenateStrings("Nie udało się otworzyć pliku ",destinationPath);
+        writeToSystemLog(message);
+        free(message);
         return;
     }
 
@@ -212,39 +289,37 @@ void copyFileUsingRead(const char *sourcePath, const char *destinationPath) {
     while ((bytesRead = read(sourceFile, buffer, BUFFER_SIZE)) > 0) {
         bytesWritten = write(destinationFile, buffer, bytesRead);
         if (bytesWritten != bytesRead) {
-            perror("Error while writing to destination file");
+            char *message = concatenateStrings("Error podczas zapisywania do pliku: ",destinationPath);
+            writeToSystemLog(message);
+            free(message);
             return;
         }
     }
 
     // Sprawdzanie błędów przy odczycie
-    if (bytesRead == -1) {
-        perror("Error while reading from source file");
-        return;
-    }
+    
 
     // Zamykanie plików
-    if (close(sourceFile) == -1) {
-        perror("Error while closing source file");
-        return;
-    }
+    close(sourceFile);
 
-    if (close(destinationFile) == -1) {
-        perror("Error while closing destination file");
-        return;
-    }
-}void copyFileUsingMmap(const char *sourcePath, const char *destinationPath) {
+    close(destinationFile);
+}
+void copyFileUsingMmap(const char *sourcePath, const char *destinationPath) {
     // Otwarcie pliku źródłowego do odczytu
     int sourceFile = open(sourcePath, O_RDONLY);
     if (sourceFile == -1) {
-        perror("Failed to open source file");
+        char* message = concatenateStrings("Nie udało się otworzyć pliku ",sourcePath);
+        writeToSystemLog(message);
+        free(message);
         return;
     }
 
     // Uzyskanie rozmiaru pliku źródłowego
     struct stat sourceStat;
     if (fstat(sourceFile, &sourceStat) == -1) {
-        perror("Failed to get source file stats");
+       char* message = concatenateStrings("Nie udało się uzyskać informacji o pliku ",sourcePath);
+        writeToSystemLog(message);
+        free(message);
         close(sourceFile);
         return;
     }
@@ -253,7 +328,9 @@ void copyFileUsingRead(const char *sourcePath, const char *destinationPath) {
     // Otwarcie pliku docelowego do zapisu
     int destinationFile = open(destinationPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (destinationFile == -1) {
-        perror("Failed to open destination file");
+        char* message = concatenateStrings("Nie udało się otworzyć pliku ",destinationPath);
+        writeToSystemLog(message);
+        free(message);
         close(sourceFile);
         return;
     }
@@ -261,7 +338,9 @@ void copyFileUsingRead(const char *sourcePath, const char *destinationPath) {
     // Zmapowanie pliku źródłowego do pamięci
     void *sourcePtr = mmap(NULL, fileSize, PROT_READ, MAP_PRIVATE, sourceFile, 0);
     if (sourcePtr == MAP_FAILED) {
-        perror("Failed to map source file to memory");
+        char* message = concatenateStrings("Nie udało się zamapować pliku do pamięci ",sourcePath);
+        writeToSystemLog(message);
+        free(message);
         close(sourceFile);
         close(destinationFile);
         return;
@@ -290,7 +369,6 @@ int setFileModificationTime(const char *filePath, time_t modificationTime) {
 
     // Ustawienie czasów modyfikacji pliku
     if (utime(filePath, &new_times) == -1) {
-        perror("Failed to set file modification time");
         return 0; // Zwraca 0 w przypadku błędu
     }
 
@@ -328,7 +406,9 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, int copySi
                 {
                     copyFile(sourceFullPath,destinationFullPath,copySize);
                     setFileModificationTime(destinationFullPath,sourceModTime);
-                    printf("Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
+                    char buffer[1024];
+                    sprintf(buffer,"Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
+                    writeToSystemLog(buffer);
                 }
                 free(sourceFullPath);
                 free(destinationFullPath);
@@ -342,7 +422,9 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, int copySi
             copyFile(sourceFullPath,destinationFullPath,copySize);
             time_t sourceModTime = getLastModificationTime(sourceFullPath);
             setFileModificationTime(destinationFullPath,sourceModTime);
-            printf("Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
+            char buffer[1024];
+            sprintf(buffer,"Kopiowanie pliku %s z %s do %s\n",sourceEntries[i]->d_name,sourceDirPath,destinationDirPath);
+            writeToSystemLog(buffer);
             free(sourceFullPath);
             free(destinationFullPath);
         
@@ -363,7 +445,9 @@ void SyncDirNormalFiles(char *sourceDirPath,char *destinationDirPath, int copySi
         {
             char* destinationFullPath = getFullPath(destinationDirPath, destinationEntries[i]->d_name);
             deleteFile(destinationFullPath);
-            printf("Usuwanie pliku %s z %s\n",destinationEntries[i]->d_name,destinationDirPath);
+            char buffer[1024];
+            sprintf(buffer,"Usuwanie pliku %s z %s\n",destinationEntries[i]->d_name,destinationDirPath);
+            writeToSystemLog(buffer);
             free(destinationFullPath);
         }
     }
@@ -393,11 +477,7 @@ void SyncDirRecoursively(char *sourceDirPath,char *destinationDirPath, int copyS
     struct dirent **sourceEntriesDirs = readDirs(sourceDir, &num_source_entries_dirs);
     struct dirent **destinationEntriesDirs = readDirs(destinationDir, &num_destination_entries_dirs);
 
-    /*int num_source_entries_files;
-    int num_destination_entries_files;
-
-    struct dirent **sourceEntriesFiles = readDirs(sourceDir, &num_source_entries_files);
-    struct dirent **destinationEntriesFiles = readDirs(destinationDir, &num_destination_entries_files);*/
+   
     for(int i = 0; i< num_source_entries_dirs;i++)
     {
         bool found = false;
@@ -410,8 +490,10 @@ void SyncDirRecoursively(char *sourceDirPath,char *destinationDirPath, int copyS
                 char* destinationFullPath = getFullPath(destinationDirPath, destinationEntriesDirs[j]->d_name);
                 
                 SyncDirRecoursively(sourceFullPath,destinationFullPath,copySize);   
-                    
-                printf("Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
+                char buffer[1024];
+                sprintf(buffer,"Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
+                writeToSystemLog(buffer);
+                //printf("Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
                 
                 free(sourceFullPath);
                 free(destinationFullPath);
@@ -424,7 +506,10 @@ void SyncDirRecoursively(char *sourceDirPath,char *destinationDirPath, int copyS
             char* destinationFullPath = getFullPath(destinationDirPath, sourceEntriesDirs[i]->d_name);
             mkdir(destinationFullPath, 0755);
             SyncDirRecoursively(sourceFullPath,destinationFullPath,copySize);
-            printf("Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
+            //printf("Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
+            char buffer[1024];
+            sprintf(buffer,"Kopiowanie katalogu %s z %s do %s\n",sourceEntriesDirs[i]->d_name,sourceDirPath,destinationDirPath);
+            writeToSystemLog(buffer);
             free(sourceFullPath);
             free(destinationFullPath);
         
@@ -444,7 +529,10 @@ void SyncDirRecoursively(char *sourceDirPath,char *destinationDirPath, int copyS
         if(found == false)
         {
             char* destinationFullPath = getFullPath(destinationDirPath, destinationEntriesDirs[i]->d_name);
-            printf("Usuwanie katalogu %s z %s\n",destinationEntriesDirs[i]->d_name,destinationDirPath);
+            char buffer[1024];
+            sprintf(buffer,"Usuwanie katalogu %s",destinationFullPath);
+            writeToSystemLog(buffer);
+            //printf("Usuwanie katalogu %s z %s\n",destinationEntriesDirs[i]->d_name,destinationDirPath);
             deleteDirectoryRecursively(destinationFullPath);
             
             free(destinationFullPath);
@@ -498,7 +586,7 @@ int stringToInt(const char *str) {
 int main(int argc, char *argv[]) {
     // Sprawdź, czy podano dwa argumenty
     bool recursive = false;
-    bool sleep = false;
+    bool s= false;
     int sleepTime = 300;
     bool size = false;
     int copySize = 1024;
@@ -527,7 +615,7 @@ int main(int argc, char *argv[]) {
             
         }else if(strcmp(argv[i],"-sleep") == 0)
         {
-            sleep = true;
+            s = true;
             i++;
             sleepTime = stringToInt(argv[i]);
             if(sleepTime == -1)
@@ -556,19 +644,33 @@ int main(int argc, char *argv[]) {
     if(recursive == true)
     {
         printf("Synchronizacja rekurencyjna\n");
-        SyncDirRecoursively(argv[1],argv[2],-1);
     }
-    if(sleep == true)
+    if(s == true)
     {
-        printf("Czas spania: %d\n",sleepTime);
+        printf("Czas spania: %d sekund\n",sleepTime);
     }
     if(size == true)
     {
-        printf("Rozmiar pliku: %d\n",copySize);
+        printf("Granica pomiędzy dużym a małym plikiem: %dbajtów\n",copySize);
     }
-    else
-    {
-        SyncDirNormalFiles(argv[1],argv[2],-1);
+    demonize();
+    while(1){
+        if(flag == 1)
+        {
+            writeToSystemLog("Demon obudzony sygnałem SIGUSR1");
+            flag = 0;
+        }
+        if(recursive == true)
+        {
+            writeToSystemLog("Demon obudzony");
+            SyncDirRecoursively(argv[1],argv[2],copySize);
+        }else
+        {
+            writeToSystemLog("Demon obudzony");
+            SyncDirNormalFiles(argv[1],argv[2],copySize);
+        }
+        writeToSystemLog("Demon zasypia");
+        sleep(sleepTime);
     }
     
     return 0;
