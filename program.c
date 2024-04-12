@@ -67,7 +67,7 @@ void handle_sigusr1(int sig) {
 }
 
 void handle_sigterm(int sig) {
-    syslog(LOG_INFO, "Demon zakończony");
+    writeToSystemLog("Demon zakończony sygnałem SIGTERM");
     closelog();
     exit(0);
 }
@@ -658,15 +658,25 @@ int main(int argc, char *argv[]) {
         if(flag == 1)
         {
             writeToSystemLog("Demon obudzony sygnałem SIGUSR1");
-            flag = 0;
+            
         }
         if(recursive == true)
         {
+            if(flag==0){
             writeToSystemLog("Demon obudzony");
+            }else
+            {
+                flag = 0;
+            }
             SyncDirRecoursively(argv[1],argv[2],copySize);
         }else
         {
+            if(flag==0){
             writeToSystemLog("Demon obudzony");
+            }else
+            {
+                flag = 0;
+            }
             SyncDirNormalFiles(argv[1],argv[2],copySize);
         }
         writeToSystemLog("Demon zasypia");
