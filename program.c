@@ -348,14 +348,13 @@ void copyFileUsingMmap(const char *sourcePath, const char *destinationPath) {
 
     // Zapisanie zmapowanego pliku źródłowego do pliku docelowego
     if (write(destinationFile, sourcePtr, fileSize) == -1) {
-        perror("Failed to write to destination file");
+        writeToSystemLog("Nie udało się zapisać zmapowanego pliku do pliku docelowego");
     }
 
     // Odmapowanie pliku źródłowego z pamięci
     if (munmap(sourcePtr, fileSize) == -1) {
-        perror("Failed to unmap source file from memory");
+        writeToSystemLog("Nie udało się odmapować pliku źródłowego z pamięci");
     }
-
     // Zamknięcie plików
     close(sourceFile);
     close(destinationFile);
